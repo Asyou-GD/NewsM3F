@@ -1,0 +1,103 @@
+# 注意: 以下配置方式要求所用RedServing版本>=0.1.6
+
+#red_service:
+#  service_name: spu-babyfuse-test # 服务名称，建议与部署应用名称保持一致
+#  process_timeout: 500 # ms, default = 500 请求处理超时
+
+model_downloads:
+  - name: classifier # 模型在RedServing服务中的代号，在配置workflow 或者 直接RPC指定调用时需要
+    model_placement: cos # local / cos, local的话就是把模型文件放本地
+    model_repo_path: red-serving/content_quality/contentproj-noteorderclickbait-test-l20-torch #模型上传之后的cos路径信息
+#    scheduler:
+#      type: dynamic # 如果使用动态batch, 改为dynamic
+#      max_queue_size: 8 # 只在 type = dynamic 时有效
+#      batch_wait_time: 100 # 只在 type = dynamic 时有效
+#      max_batch_size: 4 # 只在 type = dynamic 时有效
+    #version: -1 # default : -1，表示总是加载最新版本
+    #enable_automatic_refresh: false # 是否自动更新, default = false
+    #enable_warmup: false # 是否warmup, , default = false
+    #instance_count_each: 1 # 并发, default = 1
+#    optimization:
+#      cuda:
+#        memory_limit: 20 << 30 # 32GB
+
+# 如果不需要嵌入 python 插件，可以跳过不填
+# 以下为示例， 请各个服务的实际情况填写
+python_plugins:
+  - name: "PyProcessPre" # (1) 插件名称,在workflows定义中有用
+    py_module_path: "/workspace/redserving_py" # py目录在容器中的地址,注意设置容器的PYTHONPATH
+    py_module_name: "inference" # py文件名称,除去'.py'
+    py_class_name: "Classifier" # class名称, 即 inference.py 中继承 BaseInference 的那个类
+    py_func_names: # py function名称
+      - "pre_process"
+    instance_count_each: 1 # 各个 py_func_names 各启动多少进程, default = 1;
+    # shm_pool_size: 256 # MB , default = 512
+#  - name: "PyProcessPost"
+#    py_module_path: "/workspace/redserving_py/" # py文件目录 （本地调试下,该字段设置为 serving 镜像内的plugin 目录）
+#    py_module_name: "inference" # py文件名称,除去'.py'
+#    py_class_name: "Classifier" # class名称, 即 inference.py 中继承 BaseInference 的那个类
+#    py_func_names:
+#      - "post_process"
+#    instance_count_each: 1
+
+workflow_type: "bls"
+## 如果不需要workflow模式,可以跳过不填
+## 以下为示例, 请各个服务的实际情况填写
+#workflows:
+#  - name: "Default" # 名称,可以保持默认
+#    nodes:
+#      - name: "pre_process" # 名称,监控显示用
+#        type: "py_plugin" # 类型,可选范围 py_plugin / model_infer
+#        conf:
+#          name: "PyProcessPre" # 需要跟“python_plugins” 配置里面的名字对上
+#          process_stage: "pre_process" # 需要跟“python_plugins”-》“py_func_names” 具体的函数名称对应
+#        dependency: [] # 所依赖的上游node名称
+#      - name: "classifier" # 名称,监控显示用, 对齐 `model_settings: name`
+#        type: "model_infer" # 类型,可选范围 py_plugin / model_infer
+#        conf:
+#          name: "classifier" # 上传到cos的模型name, 对齐 `model_settings: name`
+#        dependency: ["pre_process"] # 所依赖的上游node名称
+#      - name: "post_process"
+#        type: "py_plugin"
+#        conf:
+#          name: "PyProcessPost"
+#          process_stage: "post_process"
+#        dependency: ["classifier"]
+
+
+
+
+
+#################################################################
+##                     以下配置项需要时再填写                      ##
+#################################################################
+# 以下为示例， 请各个服务的实际情况填写
+#redkv_config:
+#  #backup_request_ms: 0
+#  enable: true
+#  #load_balance: ""
+#  #max_retry: 3
+#  redkv_group: mlsys
+#  #timeout_ms: 200
+
+#rpc_server:
+#  max_concurrency: 100
+
+# 以下为示例， 请各个服务的实际情况填写
+#mq_consumer:
+#  enable: true
+#  #consumer_thread_count: 2
+#  #is_auto_delete_send_callback: false
+#  mq_group_name: media-mlsys-mq-v2-sys-testing-consumer
+#  mq_name_srv: red-rocketmq-namesrv.int.xiaohongshu.com:9876
+#  mq_tags: NOTE_IMAGE || NOTE_COVER
+#  mq_topic_name: media-mlsys-mq-v2
+#  #retry_times: 10
+#  #select_unactive_broker: false
+#  #task_queue_length: 10
+#  #tcp_transport_conn_timeout: 1000
+#  #tcp_transport_try_lock_timeout: 400
+
+# 以下为示例， 请各个服务的实际情况填写
+#hive_config:
+#  hive_table_name: sys_testing

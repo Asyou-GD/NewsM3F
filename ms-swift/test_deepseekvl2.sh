@@ -1,0 +1,18 @@
+swift infer \
+  --model /mnt/ali-sh-1/dataset/zeus/cache/modelscope/hub/deepseek-ai/deepseek-vl2-small \
+  --infer_backend pt \
+  --device_map auto \
+  --torch_dtype bfloat16 \
+  --stream false \
+  --temperature 0 \
+  --val_dataset news_gen_cls_20250329_test \
+  --streaming true \
+  --dataset_num_proc 8 \
+  --max_batch_size 8 \
+  --load_from_cache_file true \
+  --model_kwargs '{"use_fast":true,"use_cache":true}' \
+  --result_path ./news_gen_ovis_cls_infer/results.jsonl \
+  --rope_scaling linear \
+  --max_length 8192 \
+  --max_new_tokens 1 \
+  --truncation_strategy right

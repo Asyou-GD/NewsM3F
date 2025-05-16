@@ -1,0 +1,14 @@
+swift infer \
+  --model /mnt/ali-sh-1/dataset/zeus/cache/modelscope/hub/AIDC-AI/Ovis2-8B \
+  --infer_backend pt \
+  --device_map auto \
+  --torch_dtype bfloat16 \
+  --stream false \
+  --temperature 0 \
+  --val_dataset news_gen_cls_20250329_test \
+  --streaming true \
+  --dataset_num_proc 32 \
+  --max_batch_size 32 \
+  --load_from_cache_file true \
+  --model_kwargs '{"use_fast":true}' \
+  --result_path ./news_gen_ovis_cls_infer/results.jsonl

@@ -1,0 +1,18 @@
+variables:
+  IMAGE_NAME: docker-reg.devops.xiaohongshu.com/media/redserving-${CI_PROJECT_NAME}
+stages:
+  - build
+
+docker-image:
+  stage: build
+  image: docker-reg.devops.xiaohongshu.com/library/docker:v1.0
+  before_script:
+    - mkdir -p ~/.docker
+    - echo -n "12345xhS" | docker login docker-reg.devops.xiaohongshu.com --username zijing --password-stdin
+  script:
+    - IMAGE_TAG=$IMAGE_NAME:${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA:0:8} && echo $IMAGE_TAG
+    - docker build -t $IMAGE_TAG .
+    - docker push $IMAGE_TAG
+  retry: 2
+  only:
+    - tags
