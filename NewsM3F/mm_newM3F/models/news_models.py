@@ -130,11 +130,24 @@ class NewsIMGQWEN2TEXTFeatFusionClassifier(ImageClassifier):
         if hasattr(self, 'vision_projector'):
             img_feat = self.vision_projector(img_feat)
             # import pdb; pdb.set_trace()
+
+
+        if self.pgvr is not None:
+            img_repr = img_feat.mean(dim=2)                 # [B,N,D]
+            p_score, w_score = self.pgvr(img_repr)          # [B,N], [B,N]
+            self._pgvr_p, self._pgvr_w = p_score, w_score   # 缓存给 loss / predict
+
+            # 将 w_score broadcast 后乘权重
+            weight = w_score.unsqueeze(-1).unsqueeze(-1)    # [B,N,1,1]
+            img_feat = img_feat * weight                    # [B,N,C,D]  已加权
+        else:
+            self._pgvr_p = self._pgvr_w = None
+
         feat_dict['img'] = img_feat
         feat_dict['img_attn_masks'] = img_attn_masks
-        self._img_rep_each = img_feat.mean(dim=2)  
+        self._img_rep_each = img_repr if self.pgvr is not None else img_feat.mean(dim=2)
         
-    # for text feat
+        # for text feat
         for key in [x for x in extra_feat_keys if '_string' in x]:
             input_ids = torch.cat([x.get(key)['input_ids'] for x in data_samples]).to(inputs.device)
             attention_mask = torch.cat([x.get(key)['attention_mask'] for x in data_samples]).to(inputs.device)
@@ -167,10 +180,9 @@ class NewsIMGQWEN2TEXTFeatFusionClassifier(ImageClassifier):
         losses2 = self.head2.loss(feats, data_samples)
 
         if self.pgvr is not None:
-            img_repr = self._img_rep_each          # [B, N, D]
-            p, w = self.pgvr(img_repr)
-            y_parent = torch.stack([d.labels_level1 for d in data_samples]).to(p.device)
-            loss_pgvr = self.pgvr.ranking_loss(p, w, y_parent)
+            p_score = self._pgvr_p          # [B,N]
+            w_score = self._pgvr_w          # [B,N]
+            loss_pgvr = self.pgvr.ranking_loss(p_score, w_score)
         else:
             loss_pgvr = torch.tensor(0., device=inputs.device)
 
@@ -203,101 +215,97 @@ class NewsIMGQWEN2TEXTFeatFusionClassifier(ImageClassifier):
 
         return losses
 
+
     def predict(self, inputs, data_samples, **kwargs):
         feats = self.extract_feat(inputs, data_samples)
-        cls = self.head1.predict(feats, data_samples, **kwargs)
+        preds_parent = self.head1.predict(feats, data_samples, **kwargs)
+        preds_child  = self.head2.predict(feats, data_samples, **kwargs)
 
-        cls = self.head2.predict(feats, data_samples, **kwargs)
-        return cls
+        if self.pgvr is not None:
+            p_score = self._pgvr_p      # [B,N]
+            w_score = self._pgvr_w
+            for i, ds in enumerate(preds_child):
+                ds.set_field(p_score[i].cpu(), 'pgvr_p')
+                ds.set_field(w_score[i].cpu(), 'pgvr_w')
+
+        return preds_child
+# ---------------------------------------------------------------------------
+
 
 
 @MODELS.register_module()
 class PrototypeGuidedVisualRouting(BaseModule):
-    """Prototype‑Guided Visual Routing
-    
-    Args:
-        num_classes (int):   类别数
-        feat_dim (int):      输入特征维度
-        use_cosine (bool):   True=余弦相关性，False=点积
-        loss_weight (float): ranking loss 的权重
-    """
-    def __init__(
-        self,
-        num_classes: int,
-        feat_dim: int,
-        use_cosine: bool = True,
-        loss_weight: float = 1.0,
-        init_cfg=None
-    ):
+    def __init__(self,
+                 num_classes: int,
+                 feat_dim: int,
+                 use_cosine: bool = True,
+                 loss_weight: float = 1.0,
+                 init_cfg=None):
         super().__init__(init_cfg)
         self.num_classes = num_classes
         self.feat_dim = feat_dim
         self.use_cosine = use_cosine
         self.loss_weight = loss_weight
 
-        # class prototypes，shape = [C, D]
+        # prototype: [C, D]
         self.prototypes = nn.Parameter(torch.randn(num_classes, feat_dim))
+        # routing head → 单输出
+        self.routing_head = nn.Linear(feat_dim, 1)
 
-        # routing head：为每幅图得到 w_i^c
-        self.routing_head = nn.Linear(feat_dim, num_classes)
-
-        # 初始化
         nn.init.xavier_uniform_(self.prototypes)
         nn.init.xavier_uniform_(self.routing_head.weight)
         nn.init.zeros_(self.routing_head.bias)
 
-    # ------------- forward 改成同时支持 2D / 3D 特征 -----------------
+    # ---------------- forward ----------------
     def forward(self, feat: torch.Tensor):
         """
-        feat : [B, D]  或 [B, N, D]
-        返回：
-            p, w : 同形状 [..., C]
+        feat: [B, N, D]  or [B, D]
+        Returns
+        -------
+        p_score: [B, N]   # prototype 相似度求和
+        w_score: [B, N]   # routing head 打分
         """
-        original_shape = feat.shape[:-1]          # 可能是 (B,) 或 (B,N)
-        feat_flat = feat.reshape(-1, self.feat_dim)   # [(B*N), D]
+        original_shape = feat.shape[:-1]          # e.g. (B,N)
+        flat = feat.reshape(-1, self.feat_dim)    # [(B*N), D]
 
+        # ① prototype 相似度
         if self.use_cosine:
-            p_flat = F.normalize(feat_flat, dim=-1) @ F.normalize(self.prototypes, dim=-1).t()
+            sim = F.normalize(flat, dim=-1) @ F.normalize(self.prototypes, dim=-1).t()
         else:
-            p_flat = feat_flat @ self.prototypes.t()
+            sim = flat @ self.prototypes.t()      # [(B*N), C]
 
-        w_flat = self.routing_head(feat_flat)          # [(B*N), C]
+        p_score_flat = sim.sum(dim=-1)            # [(B*N),]
+        # 你也可以用 `.mean(dim=-1)`；改一行即可
 
-        # 把平铺结果 reshape 回去
-        p = p_flat.view(*original_shape, self.num_classes)
-        w = w_flat.view(*original_shape, self.num_classes)
-        return p, w
-    # ----------------------------------------------------------------
+        # ② routing 分数
+        w_score_flat = self.routing_head(flat).squeeze(-1)   # [(B*N),]
 
-    # ----------------- ranking_loss：沿 “图片” 维度 -------------------
-    def ranking_loss(self, p, w, y_parent):
+        # reshape 回 (B,N)
+        p_score = p_score_flat.view(*original_shape)
+        w_score = w_score_flat.view(*original_shape)
+        return p_score, w_score
+
+    # --------------- ranking loss ---------------
+    def ranking_loss(self, p: torch.Tensor, w: torch.Tensor):
         """
-        p, w : [B, N, C]   -- N 是一条新闻里的图片数
-        y_parent : [B, C]  -- 一级标签 one‑hot
+        p, w: [B, N]  —— 每条新闻 N 张图
         """
-        assert p.dim() == 3, "PGVR 现在只处理 [B,N,C] 形式"
+        assert p.dim() == 2, '`p` / `w` must be [B, N]'
+        B, N = p.shape
 
-        B, N, C = p.shape
-        # i / j 维度是图片
-        p_i = p.unsqueeze(2)            # [B, N, 1, C]
-        p_j = p.unsqueeze(1)            # [B, 1, N, C]
+        p_i = p.unsqueeze(2)          # [B, N, 1]
+        p_j = p.unsqueeze(1)          # [B, 1, N]
         w_i = w.unsqueeze(2)
         w_j = w.unsqueeze(1)
 
-        indicator = (p_i > p_j).float()                 # 1(p_i^c > p_j^c)
-        margin    = F.relu(w_j - w_i)                   # max(0, w_j^c - w_i^c)
+        indicator = (p_i > p_j).float()
+        margin    = F.relu(w_j - w_i)
 
-        # 去掉 i==j
-        eye = torch.eye(N, device=p.device).view(1, N, N, 1)
-        indicator = indicator * (1 - eye)
-        margin    = margin    * (1 - eye)
+        eye = torch.eye(N, device=p.device).bool()
+        indicator = indicator.masked_fill(eye, 0)
+        margin    = margin.masked_fill(eye, 0)
 
-        # 只在真标签的类上做监督
-        anchor_mask = y_parent.view(B, 1, 1, C)         # [B,1,1,C]
-        loss_mat = indicator * margin * anchor_mask     # [B,N,N,C]
-
-        total_pairs = (indicator * anchor_mask).sum().clamp(min=1.0)
-        loss = loss_mat.sum() / total_pairs
+        loss = (indicator * margin).sum() / indicator.sum().clamp(min=1.)
         return loss * self.loss_weight
 
 
@@ -349,3 +357,6 @@ class HierConsistencyLoss(nn.Module):
             loss = loss.sum()
 
         return loss * self.loss_weight
+
+
+
